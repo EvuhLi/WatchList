@@ -10,12 +10,16 @@ from scipy.sparse import hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MinMaxScaler
 from app.data_loader import load_movies
+import pandas as pd
+from sentence_transformers import SentenceTransformer
+
 
 # -----------------------------
 # 1. Load dataset
 # -----------------------------
 movies = load_movies()
 movies = movies.fillna("")  # fill missing descriptions/genres
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # -----------------------------
 # 2. Genre vector (multi-hot)
@@ -53,51 +57,53 @@ description_matrix = tfidf_vectorizer.fit_transform(
 # 4. Numeric metadata
 # -----------------------------
 meta_columns = ["rating", "votes", "year"]
-meta_data = movies[meta_columns].replace("", 0).astype(float)
+# Create a working copy of the dataframe
+meta_data = movies[meta_columns].copy()
+
+# 1. Clean 'votes': Remove the commas
+meta_data['votes'] = meta_data['votes'].astype(str).str.replace(',', '', regex=False)
+
+# 2. Clean 'year': Extract the first 4-digit number found (the start year)
+meta_data['year'] = meta_data['year'].astype(str).str.extract(r'(\d{4})')
+
+# 3. Convert all columns to float (handling any potential missing values)
+meta_data = meta_data.apply(pd.to_numeric, errors='coerce').fillna(0)
+
+# Now you can scale without error
 scaler = MinMaxScaler()
 meta_matrix = scaler.fit_transform(meta_data)
+
+print(meta_matrix)
+
 
 # -----------------------------
 # 5. Combine all vectors
 # -----------------------------
 # movie_vectors = [genres | description | metadata]
-movie_vectors = hstack([
-    genre_matrix,
-    description_matrix,
-    meta_matrix
-])
 
 # -----------------------------
 # 6. User vector builder
 # -----------------------------
-def build_user_vector(user_text, genre_preferences=None):
-    """
-    Convert user query into the same vector space.
 
-    user_text: str
-        Natural language input (e.g., 'slow emotional drama')
-    genre_preferences: list[int] or None
-        Optional weights for each genre (same order as GENRES)
-    """
+descriptions = movies["description"].fillna("").tolist()
+movie_text_vectors = model.encode(
+    descriptions,
+    normalize_embeddings=True,
+    show_progress_bar=True
+)
 
-    # Description component
-    user_desc_vec = tfidf_vectorizer.transform([user_text])
+movie_vectors = np.hstack([
+    movie_text_vectors,
+    meta_matrix
+])
 
-    # Genre component
-    if genre_preferences is None:
-        user_genre_vec = np.zeros((1, len(GENRES)))
-    else:
-        user_genre_vec = np.array([genre_preferences])
-
-    # Metadata component (neutral defaults)
-    user_meta_vec = np.array([[0.5, 0.5, 0.5]])
-
-    return hstack([
-        user_genre_vec,
-        user_desc_vec,
-        user_meta_vec
-    ])
-
+def build_user_vector(query: str):
+    text_vec = model.encode(
+        [query],
+        normalize_embeddings=True
+    )
+    meta_padding = np.zeros((1, meta_matrix.shape[1]))
+    return np.hstack([text_vec, meta_padding])
 # -----------------------------
 # 7. Example usage
 # -----------------------------
@@ -112,4 +118,4 @@ if __name__ == "__main__":
 
     print("Top 5 recommendations:")
     for idx in top_indices:
-        print(movies.iloc[idx]["title"])
+        print(movies.iloc[idx])
